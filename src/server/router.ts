@@ -1,3 +1,4 @@
+import { handleHook } from "../hooks/handler.ts";
 import type { Service } from "../service/service.ts";
 import { ServiceError } from "../service/types.ts";
 
@@ -101,6 +102,16 @@ export async function handle(req: Request, ctx: Ctx): Promise<Response> {
       const sessionId = decodeURIComponent(claimMatch[1] as string);
       const events = ctx.service.claimPendingEvents(sessionId);
       return jsonResponse(200, { events });
+    }
+
+    const hookMatch = /^\/hooks\/([^/]+)\/([^/]+)$/.exec(path);
+    if (hookMatch && method === "POST") {
+      const hookName = decodeURIComponent(hookMatch[1] as string);
+      const sessionId = decodeURIComponent(hookMatch[2] as string);
+      const body = (await readJsonBody(req)) as Record<string, unknown>;
+      const result = handleHook(ctx.service, hookName, sessionId, body);
+      if (result.status === 204) return new Response(null, { status: 204 });
+      return jsonResponse(200, { additionalContext: result.additionalContext });
     }
 
     const subsMatch = /^\/sessions\/([^/]+)\/subscriptions$/.exec(path);

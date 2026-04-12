@@ -201,6 +201,37 @@ export class Service {
       .run(sessionId, this.nowIso());
   }
 
+  updateLastHookTime(sessionId: string): void {
+    if (!sessionId) throw new ServiceError("invalid_session", "sessionId is required");
+    const now = this.nowIso();
+    this.db
+      .query(
+        "INSERT INTO sessions (sessionId, lastHookTime) VALUES (?, ?) ON CONFLICT(sessionId) DO UPDATE SET lastHookTime = excluded.lastHookTime",
+      )
+      .run(sessionId, now);
+  }
+
+  promotePendingWatermark(sessionId: string): void {
+    this.db
+      .query(
+        "UPDATE sessions SET lastUpdated = pendingLastUpdated, pendingLastUpdated = NULL WHERE sessionId = ? AND pendingLastUpdated IS NOT NULL",
+      )
+      .run(sessionId);
+  }
+
+  setSessionPid(sessionId: string, pid: number): void {
+    this.ensureSessionRow(sessionId);
+    this.db
+      .query(
+        "UPDATE sessions SET pid = ?, pendingLastUpdated = NULL, pendingWarning = 0, spawnFailures = 0, spawnBackoffUntil = NULL WHERE sessionId = ?",
+      )
+      .run(pid, sessionId);
+  }
+
+  clearSessionPid(sessionId: string): void {
+    this.db.query("UPDATE sessions SET pid = NULL WHERE sessionId = ?").run(sessionId);
+  }
+
   subscribe(sessionId: string, pattern: string): void {
     if (!sessionId) throw new ServiceError("invalid_session", "sessionId is required");
     if (!isValidPattern(pattern)) {

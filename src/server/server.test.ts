@@ -114,4 +114,24 @@ describe("REST server", () => {
     const res = await req("GET", "/nope");
     expect(res.status).toBe(404);
   });
+
+  test("POST /hooks/:hookName/:sessionId (non-delivery) returns 204", async () => {
+    const sid = "sess-hook-1";
+    const res = await req("POST", `/hooks/PostToolUse/${sid}`, { tool: "Edit" });
+    expect(res.status).toBe(204);
+    const evs = await req("GET", `/events?type=agent.claude.post-tool-use.${sid}`);
+    const events = (evs.json as { events: { type: string }[] }).events;
+    expect(events.length).toBe(1);
+  });
+
+  test("POST /hooks/:hookName/:sessionId (delivery) returns 200 with additionalContext", async () => {
+    const sid = "sess-hook-2";
+    await req("POST", `/sessions/${sid}/subscriptions`, { pattern: "local.hook.*" });
+    await req("POST", "/events", { source: "urn:ext", type: "local.hook.ping" });
+    const res = await req("POST", `/hooks/SessionStart/${sid}`, { ppid: 12345 });
+    expect(res.status).toBe(200);
+    const body = res.json as { additionalContext: string };
+    expect(body.additionalContext).toContain("1 new event");
+    expect(body.additionalContext).toContain("local.hook.ping");
+  });
 });
