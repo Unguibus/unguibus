@@ -14,6 +14,7 @@ USAGE:
   unguibus <command> [args...]
 
 COMMANDS:
+  serve [--port <n>]                    # start the localhost server (blocks)
   publish <source> <type> [--data <json>] [--time <iso8601>] [--id <string>]
   query [--type <pattern>] [--source <src>] [--since <t>] [--until <t>]
         [--limit <n>] [--offset <n>] [--order asc|desc] [--json]
@@ -200,6 +201,28 @@ async function main(): Promise<void> {
   const cmd = argv[0] as string;
   const { positional, flags } = parseArgs(argv.slice(1));
   const json = flags.json === true;
+
+  if (cmd === "serve") {
+    const { startServer } = await import("../server/index.ts");
+    const pkg = await import("../../package.json", { with: { type: "json" } });
+    const port = typeof flags.port === "string" ? Number(flags.port) : undefined;
+    const started = startServer(port !== undefined ? { port } : {});
+    const version = (pkg.default as { version: string }).version;
+    process.stdout.write(`unguibus v${version} listening on ${started.url}\n`);
+    const shutdown = async (signal: string) => {
+      process.stdout.write(`received ${signal}, shutting down\n`);
+      await started.stop();
+      process.exit(0);
+    };
+    process.on("SIGINT", () => {
+      void shutdown("SIGINT");
+    });
+    process.on("SIGTERM", () => {
+      void shutdown("SIGTERM");
+    });
+    await new Promise(() => {});
+    return;
+  }
 
   if (cmd === "hook") {
     if (positional.length < 1) usageError("hook requires <HookName>");
