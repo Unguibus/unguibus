@@ -80,6 +80,18 @@ export class Service {
   }
 
   publishEvent(input: PublishInput): PublishResult {
+    return this.publishInternal(input, false);
+  }
+
+  /**
+   * Publish bypassing the reserved-namespace check. Only the server internals
+   * (connector-failed, spawn-failed, watchdog events) should call this.
+   */
+  publishServiceEvent(input: PublishInput): PublishResult {
+    return this.publishInternal(input, true);
+  }
+
+  private publishInternal(input: PublishInput, allowReserved: boolean): PublishResult {
     if (input.specversion !== undefined && input.specversion !== "1.0") {
       throw new ServiceError(
         "invalid_specversion",
@@ -98,7 +110,7 @@ export class Service {
     if (!isValidType(type)) {
       throw new ServiceError("invalid_type", `invalid event type ${JSON.stringify(type)}`);
     }
-    if (isReservedType(type)) {
+    if (!allowReserved && isReservedType(type)) {
       throw new ServiceError(
         "reserved_type",
         "type namespace service.unguibus.* is reserved for the unguibus server",
@@ -170,7 +182,7 @@ export class Service {
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const orderSql = order === "asc" ? "ASC" : "DESC";
     const sql = `SELECT * FROM events ${where} ORDER BY publishedAt ${orderSql}, id ${orderSql}`;
-    let rows = this.db.query<EventRow, unknown[]>(sql).all(...params);
+    let rows = this.db.query<EventRow, (string | number)[]>(sql).all(...params);
 
     if (input.type?.includes("*")) {
       const pattern = input.type;
@@ -264,7 +276,7 @@ export class Service {
     const patterns = this.resolvePatterns(sessionId);
     if (patterns.length === 0) return [];
     const effectiveSince = since ?? this.sessionWatermark(sessionId);
-    const params: unknown[] = [];
+    const params: string[] = [];
     let where = "";
     if (effectiveSince) {
       where = "WHERE publishedAt > ?";
@@ -272,7 +284,7 @@ export class Service {
     }
     const selfSource = `urn:unguibus:hook:${sessionId}`;
     const rows = this.db
-      .query<EventRow, unknown[]>(`SELECT * FROM events ${where} ORDER BY publishedAt ASC, id ASC`)
+      .query<EventRow, string[]>(`SELECT * FROM events ${where} ORDER BY publishedAt ASC, id ASC`)
       .all(...params);
     return rows
       .filter((r) => r.source !== selfSource)

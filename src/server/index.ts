@@ -1,11 +1,12 @@
 import { version as pkgVersion } from "../../package.json";
 import { loadConfig } from "../config/config.ts";
 import { resolvePaths } from "../config/paths.ts";
+import { startConnectorLoop } from "../connectors/loop.ts";
 import { openDb } from "../db/schema.ts";
 import { Service } from "../service/service.ts";
 import { makeHandler } from "./router.ts";
 
-export function startServer(opts?: { port?: number; home?: string }): {
+export function startServer(opts?: { port?: number; home?: string; runConnectors?: boolean }): {
   stop: () => Promise<void>;
   port: number;
   url: string;
@@ -24,10 +25,15 @@ export function startServer(opts?: { port?: number; home?: string }): {
     fetch: handler,
   });
 
+  const connectorLoop =
+    opts?.runConnectors === false ? null : startConnectorLoop(service, db, config);
+
+  const listenPort = server.port ?? port;
   return {
-    port: server.port,
-    url: `http://127.0.0.1:${server.port}`,
+    port: listenPort,
+    url: `http://127.0.0.1:${listenPort}`,
     stop: async () => {
+      if (connectorLoop) await connectorLoop.stop();
       await server.stop(true);
       db.close();
     },
