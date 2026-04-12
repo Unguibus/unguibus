@@ -1,6 +1,12 @@
 #!/usr/bin/env bun
 import { loadConfig } from "../config/config.ts";
 import { resolvePaths } from "../config/paths.ts";
+import {
+  HOOK_EVENTS,
+  defaultSettingsPath,
+  installHooks,
+  uninstallHooks,
+} from "../install/hooks.ts";
 
 const HELP = `unguibus — localhost event log for Claude Code integrations
 
@@ -18,6 +24,9 @@ COMMANDS:
   tag <sessionId> <tag>
   untag <sessionId> <tag>
   tags <sessionId> [--json]
+  hook <HookName>                       # hook dispatcher (stdin = Claude hook JSON)
+  install [--settings <path>]           # register hooks in ~/.claude/settings.json
+  uninstall [--settings <path>]         # remove unguibus hooks from settings
   health
   --version
 
@@ -27,6 +36,8 @@ OUTPUT:
 EXIT CODES:
   0 success; 1 operation failure; 2 usage error.
 `;
+
+const UNGUIBUS_MARKER = "unguibus";
 
 interface Parsed {
   positional: string[];
@@ -68,6 +79,58 @@ function resolveBaseUrl(): string {
   const paths = resolvePaths();
   const cfg = loadConfig(paths.configFile);
   return `http://127.0.0.1:${cfg.server.port}`;
+}
+
+function quoteIfNeeded(s: string): string {
+  return s.includes(" ") ? `"${s}"` : s;
+}
+
+const DELIVERY_HOOKS = new Set(["SessionStart", "UserPromptSubmit", "PreToolUse", "Notification"]);
+
+async function hookDispatch(hookName: string): Promise<void> {
+  const stdinText = await Bun.stdin.text();
+  let body: Record<string, unknown> = {};
+  if (stdinText.trim().length > 0) {
+    try {
+      body = JSON.parse(stdinText) as Record<string, unknown>;
+    } catch {
+      return;
+    }
+  }
+  const sessionId = typeof body.session_id === "string" ? body.session_id : "";
+  if (!sessionId) return;
+  if (hookName === "SessionStart") {
+    body.ppid = process.ppid;
+  }
+  const base = resolveBaseUrl();
+  const url = `${base}/hooks/${encodeURIComponent(hookName)}/${encodeURIComponent(sessionId)}`;
+  const init: RequestInit = {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(500),
+  };
+  if (hookName === "PostToolUse") {
+    fetch(url, init).catch(() => {});
+    return;
+  }
+  try {
+    const res = await fetch(url, init);
+    if (res.status === 200 && DELIVERY_HOOKS.has(hookName)) {
+      const data = (await res.json()) as { additionalContext?: string };
+      if (typeof data.additionalContext === "string" && data.additionalContext.length > 0) {
+        const output = {
+          hookSpecificOutput: {
+            hookEventName: hookName,
+            additionalContext: data.additionalContext,
+          },
+        };
+        process.stdout.write(`${JSON.stringify(output)}\n`);
+      }
+    }
+  } catch {
+    // fail silently per design — claude's turn must continue unblocked
+  }
 }
 
 async function request(
@@ -137,6 +200,56 @@ async function main(): Promise<void> {
   const cmd = argv[0] as string;
   const { positional, flags } = parseArgs(argv.slice(1));
   const json = flags.json === true;
+
+  if (cmd === "hook") {
+    if (positional.length < 1) usageError("hook requires <HookName>");
+    await hookDispatch(positional[0] as string);
+    return;
+  }
+
+  if (cmd === "install") {
+    const settingsPath =
+      typeof flags.settings === "string" ? flags.settings : defaultSettingsPath();
+    const command = `${quoteIfNeeded(process.execPath)} ${quoteIfNeeded(Bun.main)}`;
+    const result = installHooks({
+      settingsPath,
+      command: `${command} hook`,
+      marker: UNGUIBUS_MARKER,
+    });
+    if (json) {
+      print(true, { settingsPath, ...result });
+    } else {
+      process.stdout.write(`settings: ${settingsPath}\n`);
+      if (result.added.length > 0) {
+        process.stdout.write(`added: ${result.added.join(", ")}\n`);
+      }
+      if (result.alreadyPresent.length > 0) {
+        process.stdout.write(`already present: ${result.alreadyPresent.join(", ")}\n`);
+      }
+      process.stdout.write(
+        `hooks registered for ${HOOK_EVENTS.length} events. start the server with: unguibus serve\n`,
+      );
+    }
+    return;
+  }
+
+  if (cmd === "uninstall") {
+    const settingsPath =
+      typeof flags.settings === "string" ? flags.settings : defaultSettingsPath();
+    const result = uninstallHooks({ settingsPath, marker: UNGUIBUS_MARKER });
+    if (json) {
+      print(true, { settingsPath, ...result });
+    } else {
+      process.stdout.write(`settings: ${settingsPath}\n`);
+      if (result.removed.length > 0) {
+        process.stdout.write(`removed: ${result.removed.join(", ")}\n`);
+      } else {
+        process.stdout.write("no unguibus hooks found to remove\n");
+      }
+    }
+    return;
+  }
+
   const base = resolveBaseUrl();
 
   switch (cmd) {
