@@ -10,7 +10,7 @@ let stopServer: () => Promise<void>;
 
 beforeAll(async () => {
   home = mkdtempSync(join(tmpdir(), "unguibus-test-"));
-  const started = startServer({ port: 0, home });
+  const started = startServer({ port: 0, home, runAgentLoop: false });
   base = started.url;
   stopServer = started.stop;
 });

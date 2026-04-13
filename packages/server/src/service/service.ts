@@ -11,11 +11,14 @@ import {
   type AgentStatus,
   type CloudEvent,
   type ConnectorStatus,
+  type LivePidSession,
+  type LoopCandidate,
   type PublishInput,
   type PublishResult,
   type QueryInput,
   type QueueStatus,
   ServiceError,
+  type SpawnFailureResult,
   type StoredEvent,
   type SubscriptionRollup,
   type SubscriptionSessionInfo,
@@ -73,6 +76,8 @@ export class Service {
   readonly db: Database;
   readonly config: Config;
   private nowFn: () => number;
+  private dirtyCallback: (() => void) | null = null;
+  private agentStatusProvider: (() => AgentStatus) | null = null;
 
   constructor(db: Database, config: Config, nowFn: () => number = Date.now) {
     this.db = db;
@@ -82,6 +87,18 @@ export class Service {
 
   private nowIso(): string {
     return new Date(this.nowFn()).toISOString();
+  }
+
+  setDirtyCallback(cb: (() => void) | null): void {
+    this.dirtyCallback = cb;
+  }
+
+  setAgentStatusProvider(provider: (() => AgentStatus) | null): void {
+    this.agentStatusProvider = provider;
+  }
+
+  private markDirty(): void {
+    this.dirtyCallback?.();
   }
 
   publishEvent(input: PublishInput): PublishResult {
@@ -141,6 +158,7 @@ export class Service {
         "INSERT INTO events (id, source, type, time, publishedAt, data) VALUES (?, ?, ?, ?, ?, ?)",
       )
       .run(id, source, type, time, publishedAt, dataJson);
+    this.markDirty();
     const event: StoredEvent = {
       specversion: "1.0",
       id,
@@ -226,6 +244,16 @@ export class Service {
 
   setSessionPid(sessionId: string, pid: number): void {
     this.ensureSessionRow(sessionId);
+    const existing = this.db
+      .query<{ pid: number | null }, [string]>("SELECT pid FROM sessions WHERE sessionId = ?")
+      .get(sessionId);
+    if (existing?.pid === pid) {
+      // Idempotent: the loop already stored this pid via recordSpawnSuccess,
+      // and this is the child's own SessionStart hook echoing back. Preserve
+      // pendingLastUpdated so the same-turn claim sees an empty delta
+      // (per DESIGN.md §Components/Agent Loop interaction).
+      return;
+    }
     this.db
       .query(
         "UPDATE sessions SET pid = ?, pendingLastUpdated = NULL, pendingWarning = 0, spawnFailures = 0, spawnBackoffUntil = NULL WHERE sessionId = ?",
@@ -246,12 +274,14 @@ export class Service {
     this.db
       .query("INSERT OR IGNORE INTO subscriptions (sessionId, pattern) VALUES (?, ?)")
       .run(sessionId, pattern);
+    this.markDirty();
   }
 
   unsubscribe(sessionId: string, pattern: string): void {
     this.db
       .query("DELETE FROM subscriptions WHERE sessionId = ? AND pattern = ?")
       .run(sessionId, pattern);
+    this.markDirty();
   }
 
   listSubscriptions(sessionId: string): string[] {
@@ -270,10 +300,12 @@ export class Service {
     }
     this.ensureSessionRow(sessionId);
     this.db.query("INSERT OR IGNORE INTO tags (sessionId, tag) VALUES (?, ?)").run(sessionId, tag);
+    this.markDirty();
   }
 
   untag(sessionId: string, tag: string): void {
     this.db.query("DELETE FROM tags WHERE sessionId = ? AND tag = ?").run(sessionId, tag);
+    this.markDirty();
   }
 
   listTags(sessionId: string): string[] {
@@ -510,6 +542,7 @@ export class Service {
   }
 
   getAgentStatus(): AgentStatus {
+    if (this.agentStatusProvider) return this.agentStatusProvider();
     return {
       state: "idle",
       currentSessionId: null,
@@ -517,6 +550,124 @@ export class Service {
       lastLoopTime: null,
       recentCadenceMs: 0,
     };
+  }
+
+  listLoopCandidates(): LoopCandidate[] {
+    interface Row {
+      sessionId: string;
+      pid: number | null;
+      lastUpdated: string | null;
+      spawnBackoffUntil: string | null;
+    }
+    const rows = this.db
+      .query<Row, []>(
+        `SELECT DISTINCT s.sessionId, s.pid, s.lastUpdated, s.spawnBackoffUntil
+         FROM sessions s
+         WHERE s.sessionId IN (
+           SELECT sessionId FROM subscriptions
+           UNION
+           SELECT sessionId FROM tags
+         )
+         ORDER BY s.sessionId ASC`,
+      )
+      .all();
+    return rows.map((r) => ({
+      sessionId: r.sessionId,
+      pid: r.pid,
+      lastUpdated: r.lastUpdated,
+      spawnBackoffUntil: r.spawnBackoffUntil,
+    }));
+  }
+
+  getLoopPendingEvents(sessionId: string): StoredEvent[] {
+    const patterns = this.resolvePatterns(sessionId);
+    if (patterns.length === 0) return [];
+    const row = this.db
+      .query<{ lastUpdated: string | null }, [string]>(
+        "SELECT lastUpdated FROM sessions WHERE sessionId = ?",
+      )
+      .get(sessionId);
+    const since = row?.lastUpdated ?? null;
+    const selfSource = `urn:unguibus:hook:${sessionId}`;
+    const params: string[] = [selfSource];
+    let where = "source != ?";
+    if (since !== null) {
+      where += " AND publishedAt > ?";
+      params.push(since);
+    }
+    const rows = this.db
+      .query<EventRow, string[]>(
+        `SELECT * FROM events WHERE ${where} ORDER BY publishedAt ASC, id ASC`,
+      )
+      .all(...params);
+    return rows.filter((r) => patterns.some((p) => matchesPattern(p, r.type))).map(rowToStored);
+  }
+
+  setPendingWatermark(sessionId: string, isoTime: string): void {
+    this.ensureSessionRow(sessionId);
+    this.db
+      .query("UPDATE sessions SET pendingLastUpdated = ? WHERE sessionId = ?")
+      .run(isoTime, sessionId);
+  }
+
+  recordSpawnSuccess(sessionId: string, pid: number): void {
+    this.ensureSessionRow(sessionId);
+    this.db
+      .query(
+        "UPDATE sessions SET pid = ?, spawnFailures = 0, spawnBackoffUntil = NULL WHERE sessionId = ?",
+      )
+      .run(pid, sessionId);
+  }
+
+  recordSpawnFailure(sessionId: string, backoffCapMs: number): SpawnFailureResult {
+    this.ensureSessionRow(sessionId);
+    interface Row {
+      spawnFailures: number;
+    }
+    const row = this.db
+      .query<Row, [string]>("SELECT spawnFailures FROM sessions WHERE sessionId = ?")
+      .get(sessionId);
+    const nextFailures = (row?.spawnFailures ?? 0) + 1;
+    const backoffMs = Math.min(2 ** nextFailures * 1000, backoffCapMs);
+    const backoffUntil = new Date(this.nowFn() + backoffMs).toISOString();
+    this.db
+      .query(
+        "UPDATE sessions SET pendingLastUpdated = NULL, spawnFailures = ?, spawnBackoffUntil = ? WHERE sessionId = ?",
+      )
+      .run(nextFailures, backoffUntil, sessionId);
+    return { spawnFailures: nextFailures, spawnBackoffUntil: backoffUntil };
+  }
+
+  listLivePidSessions(): LivePidSession[] {
+    interface Row {
+      sessionId: string;
+      pid: number;
+      lastHookTime: string | null;
+      pendingWarning: number;
+    }
+    const rows = this.db
+      .query<Row, []>(
+        "SELECT sessionId, pid, lastHookTime, pendingWarning FROM sessions WHERE pid IS NOT NULL",
+      )
+      .all();
+    return rows.map((r) => ({
+      sessionId: r.sessionId,
+      pid: r.pid,
+      lastHookTime: r.lastHookTime,
+      pendingWarning: r.pendingWarning !== 0,
+    }));
+  }
+
+  markPendingWarning(sessionId: string): void {
+    this.db.query("UPDATE sessions SET pendingWarning = 1 WHERE sessionId = ?").run(sessionId);
+  }
+
+  cleanupKilledSession(sessionId: string): void {
+    this.db
+      .query(
+        "UPDATE sessions SET pid = NULL, pendingLastUpdated = NULL, pendingWarning = 0 WHERE sessionId = ?",
+      )
+      .run(sessionId);
   }
 
   asCloudEvent(stored: StoredEvent): CloudEvent {

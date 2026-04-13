@@ -77,6 +77,25 @@ export interface AgentStatus {
   recentCadenceMs: number;
 }
 
+export interface LoopCandidate {
+  sessionId: string;
+  pid: number | null;
+  lastUpdated: string | null;
+  spawnBackoffUntil: string | null;
+}
+
+export interface LivePidSession {
+  sessionId: string;
+  pid: number;
+  lastHookTime: string | null;
+  pendingWarning: boolean;
+}
+
+export interface SpawnFailureResult {
+  spawnFailures: number;
+  spawnBackoffUntil: string;
+}
+
 export class ServiceError extends Error {
   readonly code: string;
   readonly status: number;
