@@ -84,6 +84,11 @@ export function startAgentLoop(
     dirty = true;
   });
   service.setAgentStatusProvider(status);
+  service.setTakeoverKill((pid) => {
+    void killPid(pid).catch((err) => {
+      console.error(`[agent-loop] takeover kill of pid ${pid} failed: ${String(err)}`);
+    });
+  });
 
   const processCandidate = async (candidate: LoopCandidate): Promise<void> => {
     if (candidate.pid !== null) {
@@ -234,6 +239,7 @@ export function startAgentLoop(
       }
       service.setDirtyCallback(null);
       service.setAgentStatusProvider(null);
+      service.setTakeoverKill(null);
     },
     markDirty: () => {
       dirty = true;
