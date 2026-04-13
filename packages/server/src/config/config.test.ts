@@ -63,4 +63,32 @@ tag = "t"
 `),
     ).toThrow(/pattern/);
   });
+
+  test("[agent-loop] defaults match design", () => {
+    const cfg = parseConfigText("");
+    expect(cfg.agentLoop.fastExitThresholdMs).toBe(5_000);
+    expect(cfg.agentLoop.maxConcurrentSpawns).toBe(4);
+    expect(cfg.agentLoop.spawnFailureThreshold).toBe(3);
+  });
+
+  test("[agent-loop] accepts overrides", () => {
+    const cfg = parseConfigText(`
+[agent-loop]
+fastExitThreshold = "2s"
+maxConcurrentSpawns = 8
+spawnFailureThreshold = 5
+`);
+    expect(cfg.agentLoop.fastExitThresholdMs).toBe(2_000);
+    expect(cfg.agentLoop.maxConcurrentSpawns).toBe(8);
+    expect(cfg.agentLoop.spawnFailureThreshold).toBe(5);
+  });
+
+  test("[agent-loop] rejects maxConcurrentSpawns < 1", () => {
+    expect(() =>
+      parseConfigText(`
+[agent-loop]
+maxConcurrentSpawns = 0
+`),
+    ).toThrow(/maxConcurrentSpawns/);
+  });
 });

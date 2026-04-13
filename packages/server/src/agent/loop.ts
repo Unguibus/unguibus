@@ -5,14 +5,20 @@ import type { AgentStatus, LoopCandidate, StoredEvent } from "../service/types.t
 import { killPid as defaultKillPid, isProcessAlive } from "./pid.ts";
 
 const SPAWN_BACKOFF_CAP_MS = 60 * 60 * 1000;
-const DEFAULT_SPAWN_FAILURE_THRESHOLD = 3;
 const CADENCE_WINDOW = 20;
 
-export interface SpawnResult {
-  ok: boolean;
-  pid?: number;
-  error?: string;
+export interface SpawnHandle {
+  ok: true;
+  pid: number;
+  exited: Promise<number>;
 }
+
+export interface SpawnFailure {
+  ok: false;
+  error: string;
+}
+
+export type SpawnResult = SpawnHandle | SpawnFailure;
 
 export type SpawnFn = (sessionId: string, prompt: string) => Promise<SpawnResult>;
 
@@ -22,7 +28,6 @@ export interface AgentLoopOptions {
   spawn?: SpawnFn;
   checkAlive?: (pid: number) => boolean;
   killPid?: (pid: number) => Promise<void>;
-  spawnFailureThreshold?: number;
   tickIntervalMs?: number;
 }
 
@@ -43,11 +48,15 @@ const defaultSpawn: SpawnFn = async (sessionId, prompt) => {
       return { ok: false, error: "spawn returned no pid" };
     }
     proc.unref?.();
-    return { ok: true, pid };
+    return { ok: true, pid, exited: proc.exited };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 };
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export function startAgentLoop(
   service: Service,
@@ -58,27 +67,32 @@ export function startAgentLoop(
   const spawn = opts.spawn ?? defaultSpawn;
   const checkAlive = opts.checkAlive ?? isProcessAlive;
   const killPid = opts.killPid ?? defaultKillPid;
-  const threshold = opts.spawnFailureThreshold ?? DEFAULT_SPAWN_FAILURE_THRESHOLD;
+  const threshold = config.agentLoop.spawnFailureThreshold;
+  const maxConcurrentSpawns = config.agentLoop.maxConcurrentSpawns;
+  const fastExitMs = config.agentLoop.fastExitThresholdMs;
 
   let dirty = false;
   let lastLoopTime: number | null = null;
-  let currentSessionId: string | null = null;
-  let state: "idle" | "running" = "idle";
+  const runningSessions = new Set<string>();
+  const spawnsInFlight = new Set<string>();
   let backoffMs = 0;
   const cadenceSamples: number[] = [];
   let stopped = false;
   let inFlight: Promise<void> | null = null;
 
-  const status = (): AgentStatus => ({
-    state,
-    currentSessionId,
-    dirty,
-    lastLoopTime: lastLoopTime === null ? null : new Date(lastLoopTime).toISOString(),
-    recentCadenceMs:
-      cadenceSamples.length === 0
-        ? 0
-        : Math.round(cadenceSamples.reduce((a, b) => a + b, 0) / cadenceSamples.length),
-  });
+  const status = (): AgentStatus => {
+    const any = runningSessions.values().next();
+    return {
+      state: runningSessions.size > 0 ? "running" : "idle",
+      currentSessionId: any.done ? null : any.value,
+      dirty,
+      lastLoopTime: lastLoopTime === null ? null : new Date(lastLoopTime).toISOString(),
+      recentCadenceMs:
+        cadenceSamples.length === 0
+          ? 0
+          : Math.round(cadenceSamples.reduce((a, b) => a + b, 0) / cadenceSamples.length),
+    };
+  };
 
   service.setDirtyCallback(() => {
     dirty = true;
@@ -91,16 +105,19 @@ export function startAgentLoop(
   });
 
   const processCandidate = async (candidate: LoopCandidate): Promise<void> => {
+    const sid = candidate.sessionId;
+    if (spawnsInFlight.has(sid)) return;
+    if (spawnsInFlight.size >= maxConcurrentSpawns) return;
     if (candidate.pid !== null) {
       if (checkAlive(candidate.pid)) return;
-      service.cleanupKilledSession(candidate.sessionId);
+      service.cleanupKilledSession(sid);
     }
     if (candidate.spawnBackoffUntil !== null) {
       const until = new Date(candidate.spawnBackoffUntil).getTime();
       if (Number.isFinite(until) && until > nowMs()) return;
     }
 
-    const all = service.getLoopPendingEvents(candidate.sessionId);
+    const all = service.getLoopPendingEvents(sid);
     if (all.length === 0) return;
 
     const cap = config.server.maxEventsPerDelivery;
@@ -120,26 +137,53 @@ export function startAgentLoop(
       advanceTo = capped[capped.length - 1]?.publishedAt ?? new Date(nowMs()).toISOString();
     }
 
-    service.setPendingWatermark(candidate.sessionId, advanceTo);
+    service.setPendingWatermark(sid, advanceTo);
 
-    currentSessionId = candidate.sessionId;
-    state = "running";
+    spawnsInFlight.add(sid);
+    runningSessions.add(sid);
     try {
       const prompt = formatEvents(capped, new Date(nowMs()));
-      const result = await spawn(candidate.sessionId, prompt);
-      if (result.ok && typeof result.pid === "number") {
-        service.recordSpawnSuccess(candidate.sessionId, result.pid);
+      const result = await spawn(sid, prompt);
+      if (result.ok) {
+        const FAST_EXIT_SENTINEL = Symbol("fast-exit-window");
+        const raced = await Promise.race<number | typeof FAST_EXIT_SENTINEL>([
+          result.exited.catch(() => -1),
+          sleep(fastExitMs).then(() => FAST_EXIT_SENTINEL),
+        ]);
+        if (raced === FAST_EXIT_SENTINEL) {
+          service.recordSpawnSuccess(sid, result.pid);
+          result.exited.catch(() => {
+            /* ignore — next loop pass handles post-window death via checkAlive */
+          });
+        } else {
+          const failure = service.recordSpawnFailure(sid, SPAWN_BACKOFF_CAP_MS);
+          if (failure.spawnFailures === threshold) {
+            try {
+              service.publishServiceEvent({
+                source: "urn:unguibus:server",
+                type: `service.unguibus.spawn-failed.${sid}`,
+                data: {
+                  sessionId: sid,
+                  spawnFailures: failure.spawnFailures,
+                  error: `claude --resume exited in under ${fastExitMs}ms (exit ${raced})`,
+                },
+              });
+            } catch (err) {
+              console.error(`[agent-loop] failed to publish spawn-failed event: ${String(err)}`);
+            }
+          }
+        }
       } else {
-        const failure = service.recordSpawnFailure(candidate.sessionId, SPAWN_BACKOFF_CAP_MS);
+        const failure = service.recordSpawnFailure(sid, SPAWN_BACKOFF_CAP_MS);
         if (failure.spawnFailures === threshold) {
           try {
             service.publishServiceEvent({
               source: "urn:unguibus:server",
-              type: `service.unguibus.spawn-failed.${candidate.sessionId}`,
+              type: `service.unguibus.spawn-failed.${sid}`,
               data: {
-                sessionId: candidate.sessionId,
+                sessionId: sid,
                 spawnFailures: failure.spawnFailures,
-                error: result.error ?? "unknown spawn failure",
+                error: result.error,
               },
             });
           } catch (err) {
@@ -148,8 +192,8 @@ export function startAgentLoop(
         }
       }
     } finally {
-      state = "idle";
-      currentSessionId = null;
+      spawnsInFlight.delete(sid);
+      runningSessions.delete(sid);
     }
   };
 
@@ -179,9 +223,8 @@ export function startAgentLoop(
     if (inFlight) return inFlight;
 
     const idleInterval = config.server.loopIntervalMs;
-    const threshold =
-      lastLoopTime === null ? 0 : lastLoopTime + (dirty ? 0 : idleInterval) + backoffMs;
-    if (nowMs() < threshold) return;
+    const t = lastLoopTime === null ? 0 : lastLoopTime + (dirty ? 0 : idleInterval) + backoffMs;
+    if (nowMs() < t) return;
 
     const wasDirty = dirty;
     dirty = false;
@@ -194,14 +237,15 @@ export function startAgentLoop(
     lastLoopTime = start;
 
     inFlight = (async () => {
-      // wasDirty forces a fresh DB read; DB is the cache since we don't maintain a
-      // separate in-memory copy — so "refresh" = re-query inside listLoopCandidates.
       void wasDirty;
       const candidates = service.listLoopCandidates();
-      for (const c of candidates) {
-        if (stopped) break;
-        await processCandidate(c);
-      }
+      await Promise.all(
+        candidates.map((c) =>
+          processCandidate(c).catch((err) => {
+            console.error(`[agent-loop] processCandidate threw for ${c.sessionId}: ${String(err)}`);
+          }),
+        ),
+      );
       await runWatchdog();
 
       const elapsed = nowMs() - start;
