@@ -1,14 +1,17 @@
 @../processes/ALL.md
-@../designs/unguibus/DESIGN.md
-@../designs/unguibus/DECISIONS.md
 
 # unguibus — agent notes
 
-Project-local notes only. Authoritative content comes from the imports above:
+Project-local notes only.
+
+Authoritative content — **not auto-loaded** (too large to fit in every agent's default context); read directly on demand:
+
+- `../designs/unguibus/DESIGN.md` — full design doc. The source of truth for architecture and intent. Read before touching anything structural.
+- `../designs/unguibus/DECISIONS.md` — DACI log. Read when working in a decision area to understand why the current shape was chosen.
+
+Imported above:
 
 - `../processes/ALL.md` — org-wide tooling, source-control, collaboration, repos, CLAUDE.md conventions.
-- `../designs/unguibus/DESIGN.md` — full spec.
-- `../designs/unguibus/DECISIONS.md` — DACI log.
 
 Add `@../specs/unguibus/<file>.md` lines here as specs land under `../specs/unguibus/` (directory does not yet exist).
 
