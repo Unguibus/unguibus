@@ -1,4 +1,6 @@
 import { version as pkgVersion } from "../../package.json";
+import { startAgentLoop } from "../agent/loop.ts";
+import { reconcileSessionPidsOnStartup } from "../agent/reconcile.ts";
 import { loadConfig } from "../config/config.ts";
 import { resolvePaths } from "../config/paths.ts";
 import { startConnectorLoop } from "../connectors/loop.ts";
@@ -6,7 +8,12 @@ import { openDb } from "../db/schema.ts";
 import { Service } from "../service/service.ts";
 import { makeHandler } from "./router.ts";
 
-export function startServer(opts?: { port?: number; home?: string; runConnectors?: boolean }): {
+export function startServer(opts?: {
+  port?: number;
+  home?: string;
+  runConnectors?: boolean;
+  runAgentLoop?: boolean;
+}): {
   stop: () => Promise<void>;
   port: number;
   url: string;
@@ -19,6 +26,8 @@ export function startServer(opts?: { port?: number; home?: string; runConnectors
   const service = new Service(db, config);
   const handler = makeHandler(service, pkgVersion);
 
+  reconcileSessionPidsOnStartup(service);
+
   const server = Bun.serve({
     port,
     hostname: "127.0.0.1",
@@ -27,12 +36,14 @@ export function startServer(opts?: { port?: number; home?: string; runConnectors
 
   const connectorLoop =
     opts?.runConnectors === false ? null : startConnectorLoop(service, db, config);
+  const agentLoop = opts?.runAgentLoop === false ? null : startAgentLoop(service, config);
 
   const listenPort = server.port ?? port;
   return {
     port: listenPort,
     url: `http://127.0.0.1:${listenPort}`,
     stop: async () => {
+      if (agentLoop) await agentLoop.stop();
       if (connectorLoop) await connectorLoop.stop();
       await server.stop(true);
       db.close();
