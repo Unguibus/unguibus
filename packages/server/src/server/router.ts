@@ -58,6 +58,22 @@ export async function handle(req: Request, ctx: Ctx): Promise<Response> {
       return jsonResponse(200, { status: "ok", version: ctx.version, uptimeSeconds });
     }
 
+    if (path === "/queues" && method === "GET") {
+      return jsonResponse(200, { queues: ctx.service.listQueues() });
+    }
+
+    if (path === "/connectors" && method === "GET") {
+      return jsonResponse(200, { connectors: ctx.service.listConnectorStatus() });
+    }
+
+    if (path === "/subscriptions" && method === "GET") {
+      return jsonResponse(200, { subscriptions: ctx.service.listAllSubscriptions() });
+    }
+
+    if (path === "/agent-status" && method === "GET") {
+      return jsonResponse(200, ctx.service.getAgentStatus());
+    }
+
     if (path === "/events" && method === "POST") {
       const body = (await readJsonBody(req)) as Record<string, unknown>;
       const result = ctx.service.publishEvent({

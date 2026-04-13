@@ -6,6 +6,15 @@ Localhost Bun server acting as an event log for event-driven Claude Code integra
 
 **Platform support (Phase 1):** Linux + macOS. Windows is deferred.
 
+## Packages
+
+This repo is a Bun-workspace monorepo.
+
+- **`packages/server/`** (`@unguibus/server`) — the Bun server: event log, connectors, hook endpoint, REST API, CLI. Binary: `unguibus`.
+- **`packages/console/`** (`@unguibus/console`) — a forthcoming read-only Electron UI that introspects a running server via HTTP (`/queues`, `/connectors`, `/subscriptions`, `/agent-status`). Currently a package stub — no implementation yet.
+
+Both packages share a single SemVer version (root `package.json`) and ship together.
+
 ## Design
 
 The authoritative spec lives in the sibling [`designs`](https://github.com/Unguibus/designs) repo at [`designs/unguibus/DESIGN.md`](https://github.com/Unguibus/designs/blob/main/unguibus/DESIGN.md). Design decisions are logged in [`designs/unguibus/DECISIONS.md`](https://github.com/Unguibus/designs/blob/main/unguibus/DECISIONS.md).
@@ -26,16 +35,16 @@ export UNGUIBUS_HOME="$PWD/.unguibus-home"
 mkdir -p "$UNGUIBUS_HOME"
 
 # Run the server.
-bun run server
+bun --filter @unguibus/server start
 
 # In another shell, poke it with the CLI.
-bun run cli -- publish "urn:test:hello" "local.test.hello-world" --data '{"msg":"hi"}'
-bun run cli -- query --limit 5
-bun run cli -- subscribe sess-1 "local.test.*"
-bun run cli -- pending sess-1
+bun --filter @unguibus/server cli publish "urn:test:hello" "local.test.hello-world" --data '{"msg":"hi"}'
+bun --filter @unguibus/server cli query --limit 5
+bun --filter @unguibus/server cli subscribe sess-1 "local.test.*"
+bun --filter @unguibus/server cli pending sess-1
 ```
 
-See `bun run cli -- --help` for the full CLI surface.
+See `bun --filter @unguibus/server cli --help` for the full CLI surface.
 
 ## Development
 
