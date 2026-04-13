@@ -10,5 +10,8 @@
     "url": "git+https://github.com/Unguibus/unguibus.git",
     "directory": "packages/console"
   },
-  "type": "module"
+  "type": "module",
+  "bin": {
+    "unguibus-console": "./src/index.ts"
+  }
 }
