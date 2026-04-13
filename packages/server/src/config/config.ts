@@ -36,6 +36,11 @@ export interface Config {
     warnAfterMs: number;
     killAfterMs: number;
   };
+  agentLoop: {
+    fastExitThresholdMs: number;
+    maxConcurrentSpawns: number;
+    spawnFailureThreshold: number;
+  };
   subscriptions: SubscriptionEntry[];
   connectors: ConnectorEntry[];
 }
@@ -59,6 +64,11 @@ const DEFAULTS = {
     warnAfter: "20m",
     killAfter: "30m",
   },
+  agentLoop: {
+    fastExitThreshold: "5s",
+    maxConcurrentSpawns: 4,
+    spawnFailureThreshold: 3,
+  },
 } as const;
 
 function asDuration(value: unknown, fallback: string): number {
@@ -81,6 +91,7 @@ export function parseConfigText(text: string): Config {
   const serverRaw = (raw.server ?? {}) as Record<string, unknown>;
   const retentionRaw = (raw.retention ?? {}) as Record<string, unknown>;
   const watchdogRaw = (raw.watchdog ?? {}) as Record<string, unknown>;
+  const agentLoopRaw = (raw["agent-loop"] ?? raw.agentLoop ?? {}) as Record<string, unknown>;
   const subsRaw = (raw.subscriptions ?? []) as unknown[];
   const connectorsRaw = (raw.connectors ?? []) as unknown[];
 
@@ -115,6 +126,20 @@ export function parseConfigText(text: string): Config {
       warnAfterMs: asDuration(watchdogRaw.warnAfter, DEFAULTS.watchdog.warnAfter),
       killAfterMs: asDuration(watchdogRaw.killAfter, DEFAULTS.watchdog.killAfter),
     },
+    agentLoop: {
+      fastExitThresholdMs: asDuration(
+        agentLoopRaw.fastExitThreshold,
+        DEFAULTS.agentLoop.fastExitThreshold,
+      ),
+      maxConcurrentSpawns: asNumber(
+        agentLoopRaw.maxConcurrentSpawns,
+        DEFAULTS.agentLoop.maxConcurrentSpawns,
+      ),
+      spawnFailureThreshold: asNumber(
+        agentLoopRaw.spawnFailureThreshold,
+        DEFAULTS.agentLoop.spawnFailureThreshold,
+      ),
+    },
     subscriptions: [],
     connectors: [],
   };
@@ -123,6 +148,15 @@ export function parseConfigText(text: string): Config {
     throw new Error(
       "[watchdog] warnAfter must be strictly less than killAfter (otherwise the warning never fires)",
     );
+  }
+  if (cfg.agentLoop.maxConcurrentSpawns < 1) {
+    throw new Error("[agent-loop] maxConcurrentSpawns must be >= 1");
+  }
+  if (cfg.agentLoop.spawnFailureThreshold < 1) {
+    throw new Error("[agent-loop] spawnFailureThreshold must be >= 1");
+  }
+  if (cfg.agentLoop.fastExitThresholdMs < 0) {
+    throw new Error("[agent-loop] fastExitThreshold must be >= 0");
   }
 
   for (const entry of subsRaw) {
