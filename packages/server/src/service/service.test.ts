@@ -155,3 +155,62 @@ maxEventsPerDelivery = 2
     expect(second[0]?.type).toBe("local.foo.c");
   });
 });
+
+describe("setSessionPid (session takeover)", () => {
+  test("null → new pid does not fire takeoverKill", () => {
+    const { svc } = makeService();
+    const killed: number[] = [];
+    svc.setTakeoverKill((p) => killed.push(p));
+    svc.setSessionPid("sess-a", 100);
+    expect(killed).toEqual([]);
+  });
+
+  test("same pid is idempotent: no kill, preserves pending state", () => {
+    const { svc } = makeService();
+    const killed: number[] = [];
+    svc.setTakeoverKill((p) => killed.push(p));
+    svc.setSessionPid("sess-b", 200);
+    svc.setPendingWatermark("sess-b", "2026-04-12T00:00:00.000Z");
+    svc.setSessionPid("sess-b", 200);
+    expect(killed).toEqual([]);
+    const [live] = svc.listLivePidSessions();
+    expect(live?.pid).toBe(200);
+  });
+
+  test("different pid triggers kill of old pid and resets state", () => {
+    const { svc } = makeService();
+    const killed: number[] = [];
+    svc.setTakeoverKill((p) => killed.push(p));
+    svc.setSessionPid("sess-c", 300);
+    svc.setPendingWatermark("sess-c", "2026-04-12T00:00:00.000Z");
+    svc.markPendingWarning("sess-c");
+    svc.recordSpawnFailure("sess-c", 60 * 60 * 1000);
+    svc.setSessionPid("sess-c", 400);
+    expect(killed).toEqual([300]);
+    const row = svc.db
+      .query<
+        {
+          pid: number | null;
+          pendingLastUpdated: string | null;
+          pendingWarning: number;
+          spawnFailures: number;
+          spawnBackoffUntil: string | null;
+        },
+        [string]
+      >(
+        "SELECT pid, pendingLastUpdated, pendingWarning, spawnFailures, spawnBackoffUntil FROM sessions WHERE sessionId = ?",
+      )
+      .get("sess-c");
+    expect(row?.pid).toBe(400);
+    expect(row?.pendingLastUpdated).toBeNull();
+    expect(row?.pendingWarning).toBe(0);
+    expect(row?.spawnFailures).toBe(0);
+    expect(row?.spawnBackoffUntil).toBeNull();
+  });
+
+  test("different pid with no takeoverKill registered does not throw", () => {
+    const { svc } = makeService();
+    svc.setSessionPid("sess-d", 500);
+    expect(() => svc.setSessionPid("sess-d", 600)).not.toThrow();
+  });
+});

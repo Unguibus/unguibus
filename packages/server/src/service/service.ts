@@ -78,6 +78,7 @@ export class Service {
   private nowFn: () => number;
   private dirtyCallback: (() => void) | null = null;
   private agentStatusProvider: (() => AgentStatus) | null = null;
+  private takeoverKill: ((pid: number) => void) | null = null;
 
   constructor(db: Database, config: Config, nowFn: () => number = Date.now) {
     this.db = db;
@@ -95,6 +96,10 @@ export class Service {
 
   setAgentStatusProvider(provider: (() => AgentStatus) | null): void {
     this.agentStatusProvider = provider;
+  }
+
+  setTakeoverKill(fn: ((pid: number) => void) | null): void {
+    this.takeoverKill = fn;
   }
 
   private markDirty(): void {
@@ -254,11 +259,18 @@ export class Service {
       // (per DESIGN.md §Components/Agent Loop interaction).
       return;
     }
+    const oldPid = existing?.pid ?? null;
     this.db
       .query(
         "UPDATE sessions SET pid = ?, pendingLastUpdated = NULL, pendingWarning = 0, spawnFailures = 0, spawnBackoffUntil = NULL WHERE sessionId = ?",
       )
       .run(pid, sessionId);
+    if (oldPid !== null && this.takeoverKill !== null) {
+      // Session takeover (DESIGN.md §Components/Agent Loop/Session Takeover):
+      // a different pid is registering for this session, so the prior process
+      // must be terminated to prevent two `claude --resume <sid>` writers.
+      this.takeoverKill(oldPid);
+    }
   }
 
   clearSessionPid(sessionId: string): void {
