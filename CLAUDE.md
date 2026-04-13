@@ -20,10 +20,10 @@ Add `@../specs/unguibus/<file>.md` lines here as specs land under `../specs/ungu
 
 ## Project-local conventions
 
-- **Suggested layout** (non-binding): `src/{service,db,server,cli,mcp,hooks,config}/` — single Bun package, flat subdirs, no monorepo.
+- **Repo layout:** monorepo with Bun workspaces. `packages/server/` (`@unguibus/server`) holds the service, REST, CLI, hooks, connectors. `packages/console/` (`@unguibus/console`) is the read-only Electron observer — package stubbed, implementation pending. Shared tooling (`biome.json`, `bun.lock`, `.github/`) stays at repo root. Per R6 #34 in the upstream DECISIONS log.
 - **Bun floor:** ≥ v1.1.39 (`process.ppid` on Windows). Pin via `package.json` `engines`. Even though Phase 1 ships Linux/macOS only, Bun's own cross-platform contract stays the floor so code doesn't regress when Windows parity is picked up later.
 - **Platform coverage (Phase 1):** Linux + macOS (POSIX). Don't pre-branch on `process.platform` for Windows paths that may never materialize — YAGNI. README states "Linux/macOS only."
-- **Package name:** `@unguibus/unguibus` (scoped).
+- **Package names:** `@unguibus/server` (binary: `unguibus`) and `@unguibus/console` (binary: `unguibus-console`). Root workspace `package.json` holds the authoritative SemVer version; per-package `package.json` files mirror it on release. See R6 #35 and R6 #37.
 - **Maintainer / copyright holder:** `John Winstead`. Use this literal string in `LICENSE` (`Copyright (c) 2026 John Winstead`), `README.md` maintainer line, and `CODEOWNERS`.
 - **Test layout:** co-located `*.test.ts` next to sources.
 - **`DECISIONS.md`** (in this repo) springs into being with the first non-trivial *implementation* decision — refinements that don't change the design. Decisions that reveal the design is wrong pause work and land in `../designs/unguibus/DECISIONS.md` instead. Copy the DACI format from there. Don't commit an empty file.

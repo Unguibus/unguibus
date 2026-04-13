@@ -8,12 +8,17 @@ import {
   matchesPattern,
 } from "../config/grammar.ts";
 import {
+  type AgentStatus,
   type CloudEvent,
+  type ConnectorStatus,
   type PublishInput,
   type PublishResult,
   type QueryInput,
+  type QueueStatus,
   ServiceError,
   type StoredEvent,
+  type SubscriptionRollup,
+  type SubscriptionSessionInfo,
 } from "./types.ts";
 
 interface EventRow {
@@ -347,6 +352,171 @@ export class Service {
       .query("UPDATE sessions SET pendingLastUpdated = ?, pendingWarning = 0 WHERE sessionId = ?")
       .run(advanceTo, sessionId);
     return capped;
+  }
+
+  listConnectorStatus(): ConnectorStatus[] {
+    interface StateRow {
+      name: string;
+      lastRunTime: string | null;
+      lastExitCode: number | null;
+      consecutiveFailures: number;
+    }
+    const rows = this.db
+      .query<StateRow, []>(
+        "SELECT name, lastRunTime, lastExitCode, consecutiveFailures FROM connector_state",
+      )
+      .all();
+    const byName = new Map<string, StateRow>();
+    for (const r of rows) byName.set(r.name, r);
+    return this.config.connectors.map((c) => {
+      const state = byName.get(c.name);
+      return {
+        name: c.name,
+        type: c.type,
+        source: c.source,
+        intervalMs: c.intervalMs,
+        timeoutMs: c.timeoutMs,
+        lastRunTime: state?.lastRunTime ?? null,
+        lastExitCode: state?.lastExitCode ?? null,
+        consecutiveFailures: state?.consecutiveFailures ?? 0,
+        backoffUntil: null,
+      };
+    });
+  }
+
+  listAllSubscriptions(): SubscriptionRollup[] {
+    interface SessionStateRow {
+      sessionId: string;
+      lastUpdated: string | null;
+      pendingLastUpdated: string | null;
+      lastHookTime: string | null;
+    }
+    const pickWatermark = (a: string | null, b: string | null): string | null => {
+      if (a && b) return a > b ? a : b;
+      return a ?? b ?? null;
+    };
+
+    const directRows = this.db
+      .query<
+        {
+          pattern: string;
+          sessionId: string;
+          lastUpdated: string | null;
+          pendingLastUpdated: string | null;
+          lastHookTime: string | null;
+        },
+        []
+      >(
+        `SELECT subs.pattern, subs.sessionId, sess.lastUpdated, sess.pendingLastUpdated, sess.lastHookTime
+         FROM subscriptions subs
+         LEFT JOIN sessions sess ON sess.sessionId = subs.sessionId
+         ORDER BY subs.pattern ASC, subs.sessionId ASC`,
+      )
+      .all();
+    const directByPattern = new Map<string, SubscriptionSessionInfo[]>();
+    for (const r of directRows) {
+      const info: SubscriptionSessionInfo = {
+        sessionId: r.sessionId,
+        watermark: pickWatermark(r.lastUpdated, r.pendingLastUpdated),
+        lastHookTime: r.lastHookTime,
+      };
+      const arr = directByPattern.get(r.pattern) ?? [];
+      arr.push(info);
+      directByPattern.set(r.pattern, arr);
+    }
+
+    const rollups: SubscriptionRollup[] = [];
+    for (const [pattern, sessions] of directByPattern) {
+      rollups.push({ pattern, origin: "direct", tag: null, sessions });
+    }
+
+    for (const sub of this.config.subscriptions) {
+      const rows = this.db
+        .query<SessionStateRow, [string]>(
+          `SELECT t.sessionId, sess.lastUpdated, sess.pendingLastUpdated, sess.lastHookTime
+           FROM tags t
+           LEFT JOIN sessions sess ON sess.sessionId = t.sessionId
+           WHERE t.tag = ?
+           ORDER BY t.sessionId ASC`,
+        )
+        .all(sub.tag);
+      const sessions = rows.map((r) => ({
+        sessionId: r.sessionId,
+        watermark: pickWatermark(r.lastUpdated, r.pendingLastUpdated),
+        lastHookTime: r.lastHookTime,
+      }));
+      rollups.push({ pattern: sub.pattern, origin: "config", tag: sub.tag, sessions });
+    }
+
+    rollups.sort((a, b) => {
+      if (a.pattern !== b.pattern) return a.pattern < b.pattern ? -1 : 1;
+      return a.origin < b.origin ? -1 : a.origin > b.origin ? 1 : 0;
+    });
+    return rollups;
+  }
+
+  listQueues(): QueueStatus[] {
+    interface SessionRow {
+      sessionId: string;
+    }
+    const sessionIds = new Set<string>();
+    for (const r of this.db.query<SessionRow, []>("SELECT sessionId FROM subscriptions").all()) {
+      sessionIds.add(r.sessionId);
+    }
+    if (this.config.subscriptions.length > 0) {
+      for (const r of this.db.query<SessionRow, []>("SELECT sessionId FROM tags").all()) {
+        sessionIds.add(r.sessionId);
+      }
+    }
+    const queues: QueueStatus[] = [];
+    for (const sessionId of sessionIds) {
+      const patterns = this.resolvePatterns(sessionId);
+      if (patterns.length === 0) continue;
+      const since = this.sessionWatermark(sessionId);
+      const selfSource = `urn:unguibus:hook:${sessionId}`;
+      interface CandidateRow {
+        type: string;
+        source: string;
+        publishedAt: string;
+      }
+      const params: string[] = [];
+      let where = "source != ?";
+      params.push(selfSource);
+      if (since) {
+        where += " AND publishedAt > ?";
+        params.push(since);
+      }
+      const rows = this.db
+        .query<CandidateRow, string[]>(
+          `SELECT type, source, publishedAt FROM events WHERE ${where} ORDER BY publishedAt ASC`,
+        )
+        .all(...params);
+      for (const pattern of patterns) {
+        let count = 0;
+        let oldest: string | null = null;
+        for (const r of rows) {
+          if (!matchesPattern(pattern, r.type)) continue;
+          count += 1;
+          if (oldest === null || r.publishedAt < oldest) oldest = r.publishedAt;
+        }
+        queues.push({ sessionId, pattern, pendingCount: count, oldestPendingAt: oldest });
+      }
+    }
+    queues.sort((a, b) => {
+      if (a.sessionId !== b.sessionId) return a.sessionId < b.sessionId ? -1 : 1;
+      return a.pattern < b.pattern ? -1 : a.pattern > b.pattern ? 1 : 0;
+    });
+    return queues;
+  }
+
+  getAgentStatus(): AgentStatus {
+    return {
+      state: "idle",
+      currentSessionId: null,
+      dirty: false,
+      lastLoopTime: null,
+      recentCadenceMs: 0,
+    };
   }
 
   asCloudEvent(stored: StoredEvent): CloudEvent {

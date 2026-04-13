@@ -6,11 +6,12 @@ import type { Service } from "../service/service.ts";
 const DEFAULT_FAILURE_THRESHOLD = 3;
 const STDERR_TAIL_BYTES = 4 * 1024;
 
-interface ConnectorStateRow {
+export interface ConnectorStateRow {
   name: string;
   lastHash: string | null;
   lastRunTime: string | null;
   consecutiveFailures: number;
+  lastExitCode: number | null;
 }
 
 export interface ConnectorRunResult {
@@ -32,19 +33,30 @@ export function getConnectorState(db: Database, name: string): ConnectorStateRow
 function upsertState(
   db: Database,
   name: string,
-  patch: { lastHash?: string; lastRunTime: string; consecutiveFailures: number },
+  patch: {
+    lastHash?: string;
+    lastRunTime: string;
+    consecutiveFailures: number;
+    lastExitCode: number | null;
+  },
 ): void {
   const existing = getConnectorState(db, name);
   if (existing === null) {
     db.query(
-      "INSERT INTO connector_state (name, lastHash, lastRunTime, consecutiveFailures) VALUES (?, ?, ?, ?)",
-    ).run(name, patch.lastHash ?? null, patch.lastRunTime, patch.consecutiveFailures);
+      "INSERT INTO connector_state (name, lastHash, lastRunTime, consecutiveFailures, lastExitCode) VALUES (?, ?, ?, ?, ?)",
+    ).run(
+      name,
+      patch.lastHash ?? null,
+      patch.lastRunTime,
+      patch.consecutiveFailures,
+      patch.lastExitCode,
+    );
     return;
   }
   const hash = patch.lastHash === undefined ? existing.lastHash : patch.lastHash;
   db.query(
-    "UPDATE connector_state SET lastHash = ?, lastRunTime = ?, consecutiveFailures = ? WHERE name = ?",
-  ).run(hash, patch.lastRunTime, patch.consecutiveFailures, name);
+    "UPDATE connector_state SET lastHash = ?, lastRunTime = ?, consecutiveFailures = ?, lastExitCode = ? WHERE name = ?",
+  ).run(hash, patch.lastRunTime, patch.consecutiveFailures, patch.lastExitCode, name);
 }
 
 async function drainWithinMs(stream: ReadableStream<Uint8Array>, ms: number): Promise<Buffer> {
@@ -136,6 +148,7 @@ export async function runConnector(
     upsertState(db, connector.name, {
       lastRunTime: nowIso(),
       consecutiveFailures: failures,
+      lastExitCode: -1,
     });
     maybePublishConnectorFailed(service, connector, failures, -1, String(err));
     return {
@@ -151,6 +164,7 @@ export async function runConnector(
     upsertState(db, connector.name, {
       lastRunTime: nowIso(),
       consecutiveFailures: failures,
+      lastExitCode: result.exitCode,
     });
     const stderrTail = tailBuffer(result.stderr, STDERR_TAIL_BYTES);
     maybePublishConnectorFailed(service, connector, failures, result.exitCode, stderrTail);
@@ -164,6 +178,7 @@ export async function runConnector(
     lastHash: hash,
     lastRunTime: nowIso(),
     consecutiveFailures: 0,
+    lastExitCode: 0,
   });
 
   if (previousHash === null) return { kind: "first-run", hash };

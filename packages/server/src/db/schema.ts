@@ -59,7 +59,20 @@ export function applySchema(db: Database): void {
       name TEXT PRIMARY KEY,
       lastHash TEXT,
       lastRunTime TEXT,
-      consecutiveFailures INTEGER NOT NULL DEFAULT 0
+      consecutiveFailures INTEGER NOT NULL DEFAULT 0,
+      lastExitCode INTEGER
     );
   `);
+  ensureColumn(db, "connector_state", "lastExitCode", "INTEGER");
+}
+
+interface PragmaColumn {
+  name: string;
+}
+
+function ensureColumn(db: Database, table: string, column: string, decl: string): void {
+  const cols = db.query<PragmaColumn, []>(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
 }

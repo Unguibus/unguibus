@@ -1,0 +1,14 @@
+{
+  "name": "@unguibus/console",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Read-only Electron UI for introspecting a running unguibus server.",
+  "license": "MIT",
+  "author": "John Winstead",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Unguibus/unguibus.git",
+    "directory": "packages/console"
+  },
+  "type": "module"
+}
