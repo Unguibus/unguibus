@@ -1,0 +1,5 @@
+{
+  "name": "unguibus",
+  "private": true,
+  "workspaces": ["packages/*"]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@unguibus/cli",
+  "version": "1.0.0",
+  "description": "CLI for managing unguibus MCP configuration",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "unguibus": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

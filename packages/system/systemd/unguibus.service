@@ -1,0 +1,20 @@
+[Unit]
+Description=unguibus MCP cross-agent messaging server
+After=network.target nats.service
+Wants=nats.service
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/opt/unguibus/packages/system
+ExecStart=/usr/bin/node /opt/unguibus/packages/system/dist/index.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=unguibus
+Environment=PORT=3000
+Environment=NATS_URL=nats://localhost:4222
+
+[Install]
+WantedBy=multi-user.target
